@@ -48,8 +48,8 @@ func main() {
 
 	// Contact the server and print out its response.
 	name := defaultName
-	if len(os.Args) > 1 {
-		name = os.Args[1]
+	if len(os.Args) > 2 {
+		name = os.Args[2]
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
