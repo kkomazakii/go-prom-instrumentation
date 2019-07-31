@@ -2,40 +2,25 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"time"
 
 	pb "github.com/kkomazakii/go-prom-instrumentation/pb"
 	"google.golang.org/grpc"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	grpc_prom "github.com/grpc-ecosystem/go-grpc-prometheus"
 )
 
+// gRPC implementations
 type server struct{}
 
-func recordMetrics() {
-	// go chan って即時実行できるんけ?
-	go func() {
-		for {
-			opsProcessed.Inc()
-			time.Sleep(2 * time.Second)
-		}
-	}()
-}
-
-var (
-	opsProcessed = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "myapp_processed_ops_total",
-		Help: "The total number of processed events",
-	})
-)
-
 func (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
+	customizedCounterMetric.WithLabelValues(in.Name).Inc()
 	log.Printf("Received: %v", in.Name)
 	return &pb.HelloReply{Message: "Hello " + in.Name}, nil
 }
@@ -44,23 +29,48 @@ func (s *server) SayHelloAgain(ctx context.Context, in *pb.HelloRequest) (*pb.He
 	return &pb.HelloReply{Message: "Hello again " + in.Name}, nil
 }
 
+var (
+	grpcPort                = ":50051"
+	reg                     = prometheus.NewRegistry()
+	grpcMetrics             = grpc_prom.NewServerMetrics()
+	customizedCounterMetric = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "demo_server_say_hello_method_handle_count",
+		Help: "Total number of RPCs handled on the server.",
+	}, []string{"name"})
+)
+
+func init() {
+	reg.MustRegister(grpcMetrics, customizedCounterMetric)
+	customizedCounterMetric.WithLabelValues("Test")
+}
+
 func main() {
-	recordMetrics()
+	// TODO: prom と grpc の役割分担がよくわからんので関数分けたい
+	log.Printf("ok go")
 
-	// ListenAndServe で block してしまうので別の thread でやる
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		http.ListenAndServe(":2112", nil)
-	}()
-
-	port := os.Args[1]
-	lis, err := net.Listen("tcp", port)
+	lis, err := net.Listen("tcp", grpcPort)
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	s := grpc.NewServer()
+
+	httpServer := &http.Server{Handler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), Addr: fmt.Sprintf("0.0.0.0:%d", 9092)}
+	log.Printf("started prometheus server")
+
+	s := grpc.NewServer(
+		grpc.StreamInterceptor(grpcMetrics.StreamServerInterceptor()),
+		grpc.UnaryInterceptor(grpcMetrics.UnaryServerInterceptor()),
+	)
+
 	pb.RegisterGreeterServer(s, &server{})
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
+
+	grpcMetrics.InitializeMetrics(s)
+
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil {
+			log.Fatal("Unable to start a http server.")
+		}
+	}()
+
+	log.Printf("ready to start grpc server")
+	log.Fatal(s.Serve(lis))
 }
